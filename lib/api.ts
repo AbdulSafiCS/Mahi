@@ -1,6 +1,8 @@
-import { API_URL } from "./env";
+//import { API_URL } from "./env";
 import { useAuth } from "../store/auth";
 import { saveRefreshToken, getRefreshToken, clearRefreshToken } from "./tokens";
+
+const API_URL = process.env.EXPO_PUBLIC_API_URL;
 
 function getAccess() {
   return useAuth.getState().accessToken;

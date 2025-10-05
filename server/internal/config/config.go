@@ -12,6 +12,7 @@ type Config struct {
 	JWTSecret      string
 	AccessTTLMin   int
 	RefreshTTLDays int
+	DBPath          string
 }
 
 // read env variables. set default if not set. 
@@ -23,6 +24,7 @@ func Load() Config {
 		JWTSecret:      getEnv("JWT_SECRET", "change_me"),
 		AccessTTLMin:   getEnvInt("ACCESS_TTL_MIN", 15),
 		RefreshTTLDays: getEnvInt("REFRESH_TTL_DAYS", 30),
+		DBPath:         getEnv("DB_PATH", "data/app.db"),
 	}
 }
 // helper function - checks Getenv and parses ints safely 

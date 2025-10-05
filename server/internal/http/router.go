@@ -13,18 +13,32 @@ import (
 	"github.com/go-chi/cors"
 )
 
+type Store interface {
+    CreateUser(email, name string) (store.User, error)
+    SetPassword(userID, plain string) error
+    VerifyCreds(email, password string) (store.User, error)
+    GetUser(id string) (store.User, bool)
+    SaveRefresh(token, userID string, exp time.Time)
+    RotateRefresh(old, newToken, userID string, exp time.Time) error
+    LookupRefresh(token string) (string, time.Time, bool)
+	DeleteRefresh(token string) error
+}
+
 type Server struct {
-	cfg     config.Config
-	jwt     *auth.JWTMaker
-	mem     *store.Memory
+    cfg config.Config
+    jwt *auth.JWTMaker
+    st  Store // <-- use the interface instead of *store.Memory
 }
 
 func NewRouter(cfg config.Config) http.Handler {
 	s := &Server{
 		cfg: cfg,
 		jwt: auth.NewJWTMaker(cfg.JWTSecret),
-		mem: store.NewMemory(),
+		// mem: store.NewMemory(), only use for store memory
 	}
+	 sqlite, err := store.NewSQLite(cfg.DBPath)
+  if err != nil { panic(err) }
+  s.st = sqlite   // ✅ use the interface field
 
 	r := chi.NewRouter()
 
@@ -42,8 +56,10 @@ func NewRouter(cfg config.Config) http.Handler {
 
 	// Auth
 	r.Route("/v1", func(r chi.Router) {
+		 r.Post("/auth/register", s.register)
 		r.Post("/auth/login", s.login)
 		r.Post("/auth/refresh", s.refresh)
+		r.Post("/auth/logout", s.logout) 
 
 		r.Group(func(pr chi.Router) {
 			pr.Use(s.authn) // JWT middleware
@@ -76,7 +92,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid_json", nil)
 		return
 	}
-	u, err := s.mem.VerifyCreds(req.Email, req.Password)
+	u, err := s.st.VerifyCreds(req.Email, req.Password)
 	if err != nil {
 		writeErr(w, http.StatusUnauthorized, "invalid_credentials", nil)
 		return
@@ -92,7 +108,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	// Refresh token (opaque string for demo)
 	rt := newRefreshToken()
 	rtExp := time.Now().Add(time.Duration(s.cfg.RefreshTTLDays) * 24 * time.Hour)
-	s.mem.SaveRefresh(rt, u.ID, rtExp)
+	s.st.SaveRefresh(rt, u.ID, rtExp)
 
 	writeJSON(w, http.StatusOK, tokenResp{
 		AccessToken: access,
@@ -102,18 +118,69 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		User: u,
 	})
 }
+// POST /v1/auth/register
+func (s *Server) register(w http.ResponseWriter, r *http.Request) {
+    var req registerReq
+    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+        writeErr(w, http.StatusBadRequest, "invalid_json", nil)
+        return
+    }
+    if req.Email == "" || req.Password == "" {
+        writeErr(w, http.StatusBadRequest, "missing_fields", nil)
+        return
+    }
+
+    // 1) Create user (fails if email exists)
+    u, err := s.st.CreateUser(req.Email, req.Name)
+    if err != nil {
+        // expect something like store.ErrEmailExists; fall back to 409
+        writeErr(w, http.StatusConflict, "email_exists", nil)
+        return
+    }
+
+    // 2) Hash & set password
+    if err := s.st.SetPassword(u.ID, req.Password); err != nil {
+        writeErr(w, http.StatusInternalServerError, "password_set_failed", nil)
+        return
+    }
+
+    // 3) Issue access token (JWT)
+    access, _, err := s.jwt.NewAccess(u.ID, s.cfg.AccessTTLMin)
+    if err != nil {
+        writeErr(w, http.StatusInternalServerError, "token_error", nil)
+        return
+    }
+
+    // 4) Issue refresh token (opaque) and persist it
+    rt := newRefreshToken()
+    rtExp := time.Now().Add(time.Duration(s.cfg.RefreshTTLDays) * 24 * time.Hour)
+    s.st.SaveRefresh(rt, u.ID, rtExp)
+
+    // 5) Respond (201 Created)
+    writeJSON(w, http.StatusCreated, tokenResp{
+        AccessToken:       access,
+        AccessExpiresIn:   s.cfg.AccessTTLMin * 60,
+        RefreshToken:      rt,
+        RefreshExpiresIn:  int(time.Until(rtExp).Seconds()),
+        User:              u,
+    })
+}
 
 type refreshReq struct {
 	RefreshToken string `json:"refresh_token"`
 }
-
+type registerReq struct {
+	Name     string `json:"name"`
+	Email    string `json:"email"`
+	Password string `json:"password"`
+}
 func (s *Server) refresh(w http.ResponseWriter, r *http.Request) {
 	var req refreshReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid_json", nil)
 		return
 	}
-	userID, exp, ok := s.mem.LookupRefresh(req.RefreshToken)
+	userID, exp, ok := s.st.LookupRefresh(req.RefreshToken)
 	if !ok || time.Now().After(exp) {
 		writeErr(w, http.StatusUnauthorized, "refresh_invalid", nil)
 		return
@@ -127,7 +194,7 @@ func (s *Server) refresh(w http.ResponseWriter, r *http.Request) {
 	// rotate refresh
 	newRT := newRefreshToken()
 	newExp := time.Now().Add(time.Duration(s.cfg.RefreshTTLDays) * 24 * time.Hour)
-	if err := s.mem.RotateRefresh(req.RefreshToken, newRT, userID, newExp); err != nil {
+	if err := s.st.RotateRefresh(req.RefreshToken, newRT, userID, newExp); err != nil {
 		writeErr(w, http.StatusUnauthorized, "refresh_invalid", nil)
 		return
 	}
@@ -141,10 +208,24 @@ func (s *Server) refresh(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 	userID := r.Context().Value(ctxKeyUserID{}).(string)
-	u, ok := s.mem.GetUser(userID)
+	u, ok := s.st.GetUser(userID)
 	if !ok {
 		writeErr(w, http.StatusNotFound, "user_not_found", nil)
 		return
 	}
 	writeJSON(w, http.StatusOK, u)
+}
+
+type logoutReq struct {
+    RefreshToken string `json:"refresh_token"`
+}
+
+func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
+    var req logoutReq
+    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+        writeErr(w, http.StatusBadRequest, "invalid_json", nil); return
+    }
+    if req.RefreshToken == "" { writeErr(w, http.StatusBadRequest, "missing_token", nil); return }
+    _ = s.st.DeleteRefresh(req.RefreshToken)
+    writeJSON(w, http.StatusOK, map[string]string{"status":"ok"})
 }
