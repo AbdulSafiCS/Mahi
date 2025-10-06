@@ -13,19 +13,24 @@ type Config struct {
 	AccessTTLMin   int
 	RefreshTTLDays int
 	DBPath          string
+	DBDriver        string // "sqlite" | "postgres"
+    DBDSN           string // for postgres
+	
 }
 
 // read env variables. set default if not set. 
 func Load() Config {
-	_ = godotenv.Load(".env")
+    _ = godotenv.Overload(".env") 
 
-	return Config{
-		Port:           getEnv("PORT", "8080"),
-		JWTSecret:      getEnv("JWT_SECRET", "change_me"),
-		AccessTTLMin:   getEnvInt("ACCESS_TTL_MIN", 15),
-		RefreshTTLDays: getEnvInt("REFRESH_TTL_DAYS", 30),
-		DBPath:         getEnv("DB_PATH", "data/app.db"),
-	}
+    return Config{
+        Port:           getEnv("PORT", "8080"),
+        JWTSecret:      getEnv("JWT_SECRET", "change_me"),
+        AccessTTLMin:   getEnvInt("ACCESS_TTL_MIN", 15),
+        RefreshTTLDays: getEnvInt("REFRESH_TTL_DAYS", 30),
+        DBPath:         getEnv("DB_PATH", "data/app.db"),
+        DBDriver:       getEnv("DB_DRIVER", "sqlite"),
+        DBDSN:          getEnv("DB_DSN", ""),
+    }
 }
 // helper function - checks Getenv and parses ints safely 
 func getEnv(key, def string) string {

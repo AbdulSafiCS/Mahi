@@ -11,18 +11,20 @@ function setAccess(token: string | null, user?: any) {
   useAuth.getState().setSession(token, user ?? useAuth.getState().user);
 }
 
-async function baseFetch(
+export async function baseFetch(
   path: string,
-  init?: RequestInit,
-  accessOverride?: string | null
+  init: RequestInit = {},
+  access?: string | null
 ) {
-  if (!API_URL) throw new Error("API_URL not set");
-  const headers = new Headers(init?.headers);
-  headers.set("Content-Type", "application/json");
-  const token = accessOverride ?? getAccess();
-  if (token) headers.set("Authorization", `Bearer ${token}`);
-  const res = await fetch(`${API_URL}${path}`, { ...init, headers });
-  return res;
+  const headers = new Headers(init.headers || {});
+  if (init.body && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
+  if (access) headers.set("Authorization", `Bearer ${access}`);
+
+  const url = `${API_URL}${path}`;
+
+  return fetch(url, { ...init, headers });
 }
 
 async function asError(res: Response) {
@@ -49,12 +51,19 @@ export async function apiRegister(
       method: "POST",
       body: JSON.stringify({ email, password, name }),
     },
-    null
+    null // no access token for register
   );
+
   if (!res.ok) throw await asError(res);
+
+  // Expecting { access_token, refresh_token, user }
   const data = await res.json();
+
   await saveRefreshToken(data.refresh_token);
-  setAccess(data.access_token, data.user);
+  // Put access + user in Zustand
+  const { setSession } = useAuth.getState();
+  setSession(data.access_token, data.user);
+
   return data;
 }
 

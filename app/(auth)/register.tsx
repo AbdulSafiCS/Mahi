@@ -62,7 +62,7 @@ export default function RegisterScreen() {
       behavior={Platform.OS === "ios" ? "padding" : "height"}
     >
       <View style={styles.card}>
-        <Text style={styles.title}>Create your account ✨</Text>
+        <Text style={styles.title}>Create your account </Text>
         <Text style={styles.subtitle}>It only takes a moment</Text>
 
         <TextInput

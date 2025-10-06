@@ -31,14 +31,26 @@ type Server struct {
 }
 
 func NewRouter(cfg config.Config) http.Handler {
-	s := &Server{
-		cfg: cfg,
-		jwt: auth.NewJWTMaker(cfg.JWTSecret),
-		// mem: store.NewMemory(), only use for store memory
-	}
-	 sqlite, err := store.NewSQLite(cfg.DBPath)
-  if err != nil { panic(err) }
-  s.st = sqlite   // ✅ use the interface field
+	  var st Store
+    var err error
+
+    switch cfg.DBDriver {
+    case "postgres":
+        st, err = store.NewPostgres(cfg.DBDSN)
+    case "sqlite":
+        fallthrough
+    default:
+        st, err = store.NewSQLite(cfg.DBPath)
+    }
+    if err != nil {
+        panic(err)
+    }
+
+    s := &Server{
+        cfg: cfg,
+        jwt: auth.NewJWTMaker(cfg.JWTSecret),
+        st:  st,
+    }
 
 	r := chi.NewRouter()
 

@@ -1,3 +1,4 @@
+// app/(auth)/_layout.tsx
 import { Stack, Redirect } from "expo-router";
 import { useAuth } from "@/store/auth";
 
