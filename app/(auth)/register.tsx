@@ -13,6 +13,7 @@ import { router } from "expo-router";
 import { useAuth } from "@/store/auth";
 import { saveRefreshToken } from "@/lib/tokens";
 import { apiRegister } from "@/lib/api"; // implement similar to apiLogin
+import { ApiError } from "@/lib/session"; // import the typed ApiError
 
 export default function RegisterScreen() {
   const { setSession } = useAuth();
@@ -46,11 +47,26 @@ export default function RegisterScreen() {
       await saveRefreshToken(res.refresh_token); // persist refresh token securely
       router.replace("/(app)/profile"); // go straight to the app
     } catch (e) {
-      Alert.alert(
-        "Sign up failed",
-        "This email may already be in use or a network error occurred."
-      );
-      console.warn(e);
+      if (
+        e instanceof ApiError ||
+        (e && typeof e === "object" && "status" in e && "code" in e)
+      ) {
+        const err = e as ApiError & { code?: string };
+        if (e.code === "email_exists") {
+          Alert.alert(
+            "Email already in use",
+            "Log in or use a different email, please."
+          );
+        } else {
+          Alert.alert(
+            "Something went wrong",
+            "Please try again. if it persists, contact support."
+          );
+        }
+      } else {
+        Alert.alert("Network error", "Check your connection and try again.");
+        console.warn(e);
+      }
     } finally {
       setLoading(false);
     }

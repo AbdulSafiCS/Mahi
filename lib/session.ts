@@ -3,6 +3,50 @@ import { API_URL } from "./env";
 import { useAuth } from "@/store/auth";
 import { saveRefreshToken, getRefreshToken, clearRefreshToken } from "./tokens";
 
+/** ---- Added: Typed API error that matches your writeErr shape ---- */
+export class ApiError extends Error {
+  status: number;
+  code?: string; // from body.error (e.g., "email_exists")
+  details?: any; // from body.details (could be string or object)
+  constructor(status: number, code?: string, message?: string, details?: any) {
+    super(message || code || `HTTP ${status}`);
+    this.status = status;
+    this.code = code;
+    this.details = details;
+    console.warn("ApiError:", { status, code, message, details });
+  }
+}
+
+/** Parse your { error, details } error JSON (or fallback to text) and throw ApiError */
+async function throwParsedApiError(res: Response): Promise<never> {
+  let raw = "";
+  let body: any = null;
+  try {
+    raw = await res.text();
+    body = raw ? JSON.parse(raw) : null;
+  } catch {
+    // non-JSON response; raw contains text/html or empty
+  }
+
+  const code: string | undefined = body?.error ?? undefined;
+
+  // Human-friendly message can live in details.message or details (string) or body.message
+  const message: string | undefined =
+    typeof body?.details === "string"
+      ? body?.details
+      : (body?.details?.message as string | undefined) ??
+        (body?.message as string | undefined) ??
+        undefined;
+
+  throw new ApiError(res.status, code, message, body?.details ?? body ?? raw);
+}
+
+/** Try to JSON.parse safely; if empty body, return null */
+async function parseJsonOrNull<T = any>(res: Response): Promise<T | null> {
+  const text = await res.text();
+  return text ? (JSON.parse(text) as T) : null;
+}
+
 /**
  * POST helper for small calls without bringing in api.ts
  */
@@ -12,8 +56,8 @@ async function postJson<T>(path: string, body: any): Promise<T> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-  return res.json();
+  if (!res.ok) await throwParsedApiError(res);
+  return (await parseJsonOrNull<T>(res)) as T;
 }
 
 /**
@@ -25,8 +69,8 @@ async function getJson<T>(path: string, access?: string): Promise<T> {
   };
   if (access) headers.Authorization = `Bearer ${access}`;
   const res = await fetch(`${API_URL}${path}`, { headers });
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-  return res.json();
+  if (!res.ok) await throwParsedApiError(res);
+  return (await parseJsonOrNull<T>(res)) as T;
 }
 
 /**
@@ -34,6 +78,7 @@ async function getJson<T>(path: string, access?: string): Promise<T> {
  * - Adds Authorization automatically (if we have an access token)
  * - If the server returns 401, tries to refresh using the stored refresh_token,
  *   updates state, and retries the original request once.
+ * - Throws ApiError on any non-2xx with fields from your writeErr format.
  */
 export async function apiFetch(input: string, init: RequestInit = {}) {
   const { accessToken, setSession, clearSession, user } = useAuth.getState();
@@ -56,7 +101,12 @@ export async function apiFetch(input: string, init: RequestInit = {}) {
     const rt = await getRefreshToken();
     if (!rt) {
       clearSession();
-      throw new Error("Unauthorized (no refresh token)");
+      // Prefer consistent error type for UI handling
+      throw new ApiError(
+        401,
+        "unauthorized",
+        "Unauthorized (no refresh token)"
+      );
     }
 
     const refreshRes = await fetch(`${API_URL}/v1/auth/refresh`, {
@@ -66,11 +116,10 @@ export async function apiFetch(input: string, init: RequestInit = {}) {
     });
 
     if (!refreshRes.ok) {
-      // Refresh failed → clear everything
+      // Refresh failed → clear everything and throw parsed error
       await clearRefreshToken();
       clearSession();
-      const txt = await refreshRes.text().catch(() => "");
-      throw new Error(`Session refresh failed: ${refreshRes.status} ${txt}`);
+      await throwParsedApiError(refreshRes);
     }
 
     // Update local session with the new tokens
@@ -78,7 +127,7 @@ export async function apiFetch(input: string, init: RequestInit = {}) {
     const newAccess: string = data.access_token;
     const newRefresh: string = data.refresh_token;
     await saveRefreshToken(newRefresh);
-    setSession(newAccess, user); // keep existing user; callers can refetch /me if they need fresh user
+    setSession(newAccess, user); // keep existing user; callers can refetch /me if needed
 
     // Retry original request exactly once with the new access token
     res = await fetch(`${API_URL}${input}`, {
@@ -88,12 +137,10 @@ export async function apiFetch(input: string, init: RequestInit = {}) {
   }
 
   if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`${res.status} ${text || res.statusText}`);
+    await throwParsedApiError(res);
   }
-  // Try to parse JSON; if body is empty, return null
-  const text = await res.text();
-  return text ? JSON.parse(text) : null;
+
+  return parseJsonOrNull(res);
 }
 
 /**

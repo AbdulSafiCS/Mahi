@@ -27,7 +27,7 @@ type Store interface {
 type Server struct {
     cfg config.Config
     jwt *auth.JWTMaker
-    st  Store // <-- use the interface instead of *store.Memory
+    st  Store // use the interface instead of *store.Memory
 }
 
 func NewRouter(cfg config.Config) http.Handler {
@@ -86,6 +86,8 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status":"ok"})
 }
 
+//login
+
 type loginReq struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`
@@ -130,6 +132,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		User: u,
 	})
 }
+
 // POST /v1/auth/register
 func (s *Server) register(w http.ResponseWriter, r *http.Request) {
     var req registerReq
@@ -141,12 +144,20 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
         writeErr(w, http.StatusBadRequest, "missing_fields", nil)
         return
     }
-
+	
     // 1) Create user (fails if email exists)
     u, err := s.st.CreateUser(req.Email, req.Name)
     if err != nil {
         // expect something like store.ErrEmailExists; fall back to 409
-        writeErr(w, http.StatusConflict, "email_exists", nil)
+        writeErr(
+		w,
+		http.StatusConflict,
+		"email_exists",
+		map[string]any{
+			"message": "This email is already registered. Try signing in or use a different email.",
+			"field":   "email",
+		},
+	)
         return
     }
 

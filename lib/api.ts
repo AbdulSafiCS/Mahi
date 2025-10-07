@@ -1,12 +1,10 @@
-//import { API_URL } from "./env";
+// lib/api.ts
 import { useAuth } from "../store/auth";
 import { saveRefreshToken, getRefreshToken, clearRefreshToken } from "./tokens";
+import { ApiError } from "./errors"; // <-- use the class above
 
 const API_URL = process.env.EXPO_PUBLIC_API_URL;
 
-function getAccess() {
-  return useAuth.getState().accessToken;
-}
 function setAccess(token: string | null, user?: any) {
   useAuth.getState().setSession(token, user ?? useAuth.getState().user);
 }
@@ -21,22 +19,27 @@ export async function baseFetch(
     headers.set("Content-Type", "application/json");
   }
   if (access) headers.set("Authorization", `Bearer ${access}`);
-
   const url = `${API_URL}${path}`;
-
   return fetch(url, { ...init, headers });
 }
 
-async function asError(res: Response) {
+async function toApiError(res: Response): Promise<ApiError> {
   let body: any = null;
   try {
     body = await res.json();
-  } catch {}
-  const msg = body?.error || body?.message || `${res.status} ${res.statusText}`;
-  const err = new Error(msg) as any;
-  err.status = res.status;
-  err.body = body;
-  return err;
+  } catch {
+    // keep body null if not JSON
+  }
+  // server uses writeErr(w, status, code, details) -> { error: code, details?: any, message?: string }
+  const code = body?.error;
+  const message =
+    body?.message || body?.error || `${res.status} ${res.statusText}`;
+  return new ApiError({
+    status: res.status,
+    message,
+    code,
+    details: body?.details ?? body,
+  });
 }
 
 // ---- Auth endpoints ----
@@ -47,36 +50,24 @@ export async function apiRegister(
 ) {
   const res = await baseFetch(
     "/v1/auth/register",
-    {
-      method: "POST",
-      body: JSON.stringify({ email, password, name }),
-    },
-    null // no access token for register
+    { method: "POST", body: JSON.stringify({ email, password, name }) },
+    null
   );
+  if (!res.ok) throw await toApiError(res);
 
-  if (!res.ok) throw await asError(res);
-
-  // Expecting { access_token, refresh_token, user }
-  const data = await res.json();
-
+  const data = await res.json(); // { access_token, refresh_token, user }
   await saveRefreshToken(data.refresh_token);
-  // Put access + user in Zustand
-  const { setSession } = useAuth.getState();
-  setSession(data.access_token, data.user);
-
+  setAccess(data.access_token, data.user);
   return data;
 }
 
 export async function apiLogin(email: string, password: string) {
   const res = await baseFetch(
     "/v1/auth/login",
-    {
-      method: "POST",
-      body: JSON.stringify({ email, password }),
-    },
+    { method: "POST", body: JSON.stringify({ email, password }) },
     null
   );
-  if (!res.ok) throw await asError(res);
+  if (!res.ok) throw await toApiError(res);
   const data = await res.json();
   await saveRefreshToken(data.refresh_token);
   setAccess(data.access_token, data.user);
@@ -86,13 +77,10 @@ export async function apiLogin(email: string, password: string) {
 export async function apiRefresh(refreshToken: string) {
   const res = await baseFetch(
     "/v1/auth/refresh",
-    {
-      method: "POST",
-      body: JSON.stringify({ refresh_token: refreshToken }),
-    },
+    { method: "POST", body: JSON.stringify({ refresh_token: refreshToken }) },
     null
   );
-  if (!res.ok) throw await asError(res);
+  if (!res.ok) throw await toApiError(res);
   return res.json();
 }
 
@@ -102,35 +90,11 @@ export async function apiMe(access?: string) {
     { method: "GET" },
     access ?? undefined
   );
-  if (!res.ok) throw await asError(res);
+  if (!res.ok) throw await toApiError(res);
   return res.json();
 }
 
 export async function apiLogout() {
-  // client-side: clear tokens; server has no /logout in memory mode
   await clearRefreshToken();
   setAccess(null, null);
-}
-
-// JSON helper with auto refresh on 401
-export async function apiJson<T = any>(
-  path: string,
-  init?: RequestInit
-): Promise<T> {
-  let res = await baseFetch(path, init);
-  if (res.status === 401) {
-    const rt = await getRefreshToken();
-    if (!rt) throw await asError(res);
-    const refreshed = await apiRefresh(rt);
-    await saveRefreshToken(refreshed.refresh_token);
-    setAccess(refreshed.access_token);
-    res = await baseFetch(path, init); // retry
-  }
-  if (!res.ok) throw await asError(res);
-  return res.json();
-}
-
-export async function apiHealth() {
-  const res = await baseFetch("/healthz", { method: "GET" });
-  return res.ok;
 }
